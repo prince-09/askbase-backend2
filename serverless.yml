@@ -1,0 +1,78 @@
+service: askbase-backend
+
+frameworkVersion: '3'
+
+provider:
+  name: aws
+  runtime: nodejs18.x
+  stage: ${opt:stage, 'dev'}
+  region: ${opt:region, 'ap-south-1'}
+  memorySize: 1024
+  timeout: 30
+  environment:
+    NODE_ENV: ${self:provider.stage}
+    MONGODB_URL: ${env:MONGODB_URL, ''}
+    MONGODB_USER: ${env:MONGODB_USER, ''}
+    MONGODB_PASSWORD: ${env:MONGODB_PASSWORD, ''}
+    MONGODB_DB_NAME: ${env:MONGODB_DB_NAME, 'ai_sql_assistant'}
+    OPENROUTER_API_URL: ${env:OPENROUTER_API_URL, 'https://openrouter.ai/api/v1/chat/completions'}
+    OPENROUTER_API_KEY: ${env:OPENROUTER_API_KEY}
+    MISTRAL_MODEL: ${env:MISTRAL_MODEL, 'mistralai/mistral-7b-instruct'}
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+          Resource: "arn:aws:logs:*:*:*"
+        - Effect: Allow
+          Action:
+            - ec2:CreateNetworkInterface
+            - ec2:DescribeNetworkInterfaces
+            - ec2:DeleteNetworkInterface
+          Resource: "*"
+
+functions:
+  api:
+    handler: handler.handler
+    timeout: 30
+    events:
+      - http:
+          path: /{proxy+}
+          method: ANY
+          cors: true
+      - http:
+          path: /
+          method: ANY
+          cors: true
+
+plugins:
+  - serverless-dotenv-plugin
+  - serverless-offline
+
+custom:
+  serverless-offline:
+    httpPort: 8000
+    noPrependStageInUrl: true
+
+package:
+  patterns:
+    - '!node_modules/.cache/**'
+    - '!node_modules/@types/**'
+    - '!node_modules/typescript/**'
+    - '!node_modules/typescript-*/**'
+    - '!.git/**'
+    - '!.vscode/**'
+    - '!*.log'
+    - '!coverage/**'
+    - '!.nyc_output/**'
+    - '!test/**'
+    - '!tests/**'
+    - '!__tests__/**'
+    - '!.env*'
+    - '!README.md'
+    - '!serverless.yml'
+    - '!package-lock.json'
+    - '!yarn.lock' 

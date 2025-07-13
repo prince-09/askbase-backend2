@@ -1,0 +1,43 @@
+{
+  "httpMethod": "GET",
+  "path": "/health",
+  "headers": {
+    "Content-Type": "application/json",
+    "User-Agent": "Mozilla/5.0 (compatible; AskBase/1.0)"
+  },
+  "queryStringParameters": null,
+  "pathParameters": null,
+  "stageVariables": null,
+  "requestContext": {
+    "resourceId": "test",
+    "resourcePath": "/health",
+    "httpMethod": "GET",
+    "extendedRequestId": "test",
+    "requestTime": "01/Jan/2024:00:00:00 +0000",
+    "path": "/dev/health",
+    "accountId": "123456789012",
+    "protocol": "HTTP/1.1",
+    "stage": "dev",
+    "domainPrefix": "test",
+    "requestTimeEpoch": 1704067200000,
+    "requestId": "test",
+    "identity": {
+      "cognitoIdentityPoolId": null,
+      "accountId": null,
+      "cognitoIdentityId": null,
+      "caller": null,
+      "sourceIp": "127.0.0.1",
+      "principalOrgId": null,
+      "accessKey": null,
+      "cognitoAuthenticationType": null,
+      "cognitoAuthenticationProvider": null,
+      "userArn": null,
+      "userAgent": "Mozilla/5.0 (compatible; AskBase/1.0)",
+      "user": null
+    },
+    "domainName": "test.execute-api.us-east-1.amazonaws.com",
+    "apiId": "test"
+  },
+  "body": null,
+  "isBase64Encoded": false
+} 
