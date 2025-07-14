@@ -117,69 +117,49 @@ function convertDecimalsToFloats(obj) {
 }
 
 // Database functions
-async function getAllTables() {
-  if (!pgClient) {
-    throw new Error('No database connection');
-  }
-  
+async function getAllTables(client) {
+  if (!client) throw new Error('No database connection');
   try {
-    console.log('[DB] About to get all tables...');
-    const result = await pgClient.query(`
+    const result = await client.query(`
       SELECT table_name 
       FROM information_schema.tables 
       WHERE table_schema = 'public' 
       AND table_type = 'BASE TABLE'
       ORDER BY table_name
     `);
-    console.log('[DB] All tables fetched successfully!');
-    const tables = result.rows.map(row => row.table_name);
-    console.log(`🔍 Found ${tables.length} tables: ${tables}`);
-    return tables;
+    return result.rows.map(row => row.table_name);
   } catch (error) {
     console.error('Error getting tables:', error);
     throw error;
   }
 }
 
-async function getTableColumns(tableName) {
-  if (!pgClient) {
-    throw new Error('No database connection');
-  }
-  
+async function getTableColumns(tableName, client) {
+  if (!client) throw new Error('No database connection');
   try {
-    console.log(`[DB] About to get columns for table: ${tableName}...`);
-    const result = await pgClient.query(`
+    const result = await client.query(`
       SELECT column_name, data_type, is_nullable
       FROM information_schema.columns 
       WHERE table_schema = 'public' 
       AND table_name = $1
       ORDER BY ordinal_position
     `, [tableName]);
-    console.log(`[DB] Columns fetched for ${tableName} successfully!`);
-    const columns = result.rows.map(row => ({
+    return result.rows.map(row => ({
       name: row.column_name,
       type: row.data_type,
       nullable: row.is_nullable === 'YES'
     }));
-    
-    console.log(`🔍 Table ${tableName} has ${columns.length} columns: ${columns.map(col => col.name)}`);
-    return columns;
   } catch (error) {
     console.error(`Error getting columns for table ${tableName}:`, error);
     throw error;
   }
 }
 
-async function executeSQLQuery(sqlQuery) {
-  if (!pgClient) {
-    throw new Error('No database connection');
-  }
-  
+async function executeSQLQuery(sqlQuery, client) {
+  if (!client) throw new Error('No database connection');
   try {
-    console.log(`[DB] About to execute SQL query: ${sqlQuery.substring(0, 50)}...`);
-    const result = await pgClient.query(sqlQuery);
-    console.log(`[DB] Query executed successfully!`);
-    
+    const sqlStatements = sqlQuery.split(';').map(s => s.trim()).filter(Boolean);
+    const result = await client.query(sqlStatements[0]);
     // Convert results to plain objects and handle special types
     const rows = result.rows.map(row => {
       const plainRow = {};
@@ -194,7 +174,6 @@ async function executeSQLQuery(sqlQuery) {
       }
       return plainRow;
     });
-    
     return rows;
   } catch (error) {
     console.error('Error executing SQL query:', error);
@@ -833,18 +812,6 @@ app.post('/connect-db', async (req, res) => {
     const { host, port, database, username, password } = req.body;
     logDbConnectionAttempt({ host, port, database, user: username });
     
-    // Add DNS resolution debugging
-    console.log('[DNS] Attempting to resolve host:', host);
-    try {
-      const dns = require('dns');
-      const { promisify } = require('util');
-      const resolve4 = promisify(dns.resolve4);
-      const addresses = await resolve4(host);
-      console.log('[DNS] Resolved addresses:', addresses);
-    } catch (dnsError) {
-      console.error('[DNS] Resolution failed:', dnsError.message);
-    }
-    
     const client = new Client({
       host,
       port,
@@ -976,7 +943,7 @@ app.post('/ask', async (req, res) => {
     // Step 2: Get all tables
     let allTables;
     try {
-      allTables = await getAllTables();
+      allTables = await getAllTables(client);
     } catch (err) {
       console.error('[DB QUERY ERROR] getAllTables', err);
       return res.status(500).json({
@@ -1012,7 +979,7 @@ app.post('/ask', async (req, res) => {
     const relevantTables = [];
     for (const tableName of relevantTableNames) {
       try {
-        const columns = await getTableColumns(tableName);
+        const columns = await getTableColumns(tableName, client);
         relevantTables.push({
           name: tableName,
           columns: columns
@@ -1046,7 +1013,7 @@ app.post('/ask', async (req, res) => {
     let results;
     const startTime = Date.now();
     try {
-      results = await executeSQLQuery(sqlQuery);
+      results = await executeSQLQuery(sqlQuery, client);
       console.log(`🔍 Query executed successfully, got ${results.length} results`);
     } catch (err) {
       console.error('[DB QUERY ERROR] executeSQLQuery', err);
