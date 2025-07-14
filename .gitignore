@@ -12,7 +12,6 @@ yarn-error.log*
 .env.production.local
 askbase.pem
 .serverlessignore
-deploy.sh
 
 # Logs
 logs
