@@ -191,7 +191,8 @@ async function getTableColumns(tableName, pool) {
 async function executeSQLQuery(sqlQuery, pool) {
   if (!pool) throw new Error('No database connection');
   try {
-    const result = await pool.query(sqlQuery);
+    const sqlStatements = sqlQuery.split(';').map(s => s.trim()).filter(Boolean);
+    const result = await pool.query(sqlStatements[0]);
     // Convert results to plain objects and handle special types
     const rows = result.rows.map(row => {
       const plainRow = {};
