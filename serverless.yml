@@ -16,8 +16,13 @@ provider:
     MONGODB_PASSWORD: ${env:MONGODB_PASSWORD, ''}
     MONGODB_DB_NAME: ${env:MONGODB_DB_NAME, 'ai_sql_assistant'}
     OPENROUTER_API_URL: ${env:OPENROUTER_API_URL, 'https://openrouter.ai/api/v1/chat/completions'}
-    OPENROUTER_API_KEY: ${env:OPENROUTER_API_KEY}
+    OPENROUTER_API_KEY: ${env:OPENROUTER_API_KEY, ''}
     MISTRAL_MODEL: ${env:MISTRAL_MODEL, 'mistralai/mistral-7b-instruct'}
+    POSTGRES_HOST: ${env:POSTGRES_HOST, ''}
+    POSTGRES_PORT: ${env:POSTGRES_PORT, '5432'}
+    POSTGRES_DATABASE: ${env:POSTGRES_DATABASE, ''}
+    POSTGRES_USER: ${env:POSTGRES_USER, ''}
+    POSTGRES_PASSWORD: ${env:POSTGRES_PASSWORD, ''}
   iam:
     role:
       statements:
@@ -71,7 +76,6 @@ package:
     - '!test/**'
     - '!tests/**'
     - '!__tests__/**'
-    - '!.env*'
     - '!README.md'
     - '!serverless.yml'
     - '!package-lock.json'

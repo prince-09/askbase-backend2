@@ -4,10 +4,12 @@ import helmet from 'helmet';
 import compression from 'compression';
 import rateLimit from 'express-rate-limit';
 import { MongoClient } from 'mongodb';
-import { Client } from 'pg';
+import knex from 'knex';
 import axios from 'axios';
 import { v4 as uuidv4 } from 'uuid';
 import dotenv from 'dotenv';
+import awsServerlessExpress from 'aws-serverless-express';
+import { Pool } from 'pg';
 
 dotenv.config();
 
@@ -29,46 +31,77 @@ const AI_API_URL = process.env.OPENROUTER_API_URL || 'https://openrouter.ai/api/
 const AI_API_KEY = process.env.OPENROUTER_API_KEY;
 const MISTRAL_MODEL = process.env.MISTRAL_MODEL || 'mistralai/mistral-7b-instruct';
 
+// PostgreSQL configuration
+const POSTGRES_HOST = process.env.POSTGRES_HOST || 'aws-0-ap-southeast-1.pooler.supabase.com';
+const POSTGRES_PORT = process.env.POSTGRES_PORT ? parseInt(process.env.POSTGRES_PORT) : 6543;
+const POSTGRES_DATABASE = process.env.POSTGRES_DATABASE || 'postgres';
+const POSTGRES_USER = process.env.POSTGRES_USER || 'postgres.zxfkihyydepmtnoejdyv';
+const POSTGRES_PASSWORD = process.env.POSTGRES_PASSWORD || '0AuajXTTE6hRUqRY';
+const POSTGRES_POOL_MODE = process.env.POSTGRES_POOL_MODE || 'transaction';
+
 // MongoDB connection
 let mongoClient = null;
 let db = null;
 let chatSessionsCollection = null;
 let reportsCollection = null;
 
-// PostgreSQL connection
-let pgClient = null;
+// Knex connection
+let knexInstance = null;
 let dbConnection = null;
 let dbCredentials = null;
 
 // Global variables
 let chatHistory = [];
 
-// Initialize MongoDB
-async function initMongoDB() {
+/** === Mongo Setup (on-demand, cached) === **/
+let cachedMongoClient = null;
+const getMongoClient = async () => {
+  if (cachedMongoClient) return cachedMongoClient;
+  console.log('[MongoDB] Attempting to connect...');
+  const client = new MongoClient(MONGODB_URL, {
+    maxPoolSize: 5,
+    serverSelectionTimeoutMS: 5000,
+  });
   try {
-    console.log('🔌 Connecting to MongoDB...');
-    mongoClient = new MongoClient(MONGODB_URL);
-    await mongoClient.connect();
-    db = mongoClient.db(MONGODB_DB_NAME);
-    
-    // Initialize collections
-    chatSessionsCollection = db.collection('chat_sessions');
-    reportsCollection = db.collection('reports');
-    
-    // Create indexes
-    await chatSessionsCollection.createIndex({ session_id: 1 }, { unique: true });
-    await chatSessionsCollection.createIndex({ created_at: -1 });
-    await chatSessionsCollection.createIndex({ last_activity: -1 });
-    await reportsCollection.createIndex({ created_at: -1 });
-    await reportsCollection.createIndex({ id: 1 }, { unique: true });
-    
-    console.log('✅ MongoDB connected successfully!');
-    return true;
-  } catch (error) {
-    console.error('❌ MongoDB connection failed:', error.message);
-    return false;
+    await client.connect();
+    console.log('[MongoDB] Connected successfully!');
+    cachedMongoClient = client;
+    return cachedMongoClient;
+  } catch (err) {
+    console.error('[MongoDB] Connection failed:', err);
+    throw err;
   }
+};
+
+// Helper to build a connection string with pool_mode
+function buildPgConnectionString({ host, port, database, user, password, pool_mode = 'transaction' }) {
+  return `postgresql://${encodeURIComponent(user)}:${encodeURIComponent(password)}@${host}:${port}/${database}?pool_mode=${pool_mode}`;
 }
+
+/** === SQL Setup (on-demand, cached) === **/
+let cachedSqlPool = null;
+const getSqlPool = () => {
+  if (cachedSqlPool) return cachedSqlPool;
+  const connStr = buildPgConnectionString({
+    host: POSTGRES_HOST,
+    port: POSTGRES_PORT,
+    database: POSTGRES_DATABASE,
+    user: POSTGRES_USER,
+    password: POSTGRES_PASSWORD,
+    pool_mode: POSTGRES_POOL_MODE || 'transaction',
+  });
+  console.log('[PostgreSQL] Creating pool with connection string:', connStr);
+  cachedSqlPool = new Pool({
+    connectionString: connStr,
+    max: 5,
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 5000,
+  });
+  cachedSqlPool.query('SELECT 1')
+    .then(() => console.log('[PostgreSQL] Connected successfully!'))
+    .catch(err => console.error('[PostgreSQL] Connection failed:', err));
+  return cachedSqlPool;
+};
 
 // Helper functions
 function generateSessionId() {
@@ -117,10 +150,10 @@ function convertDecimalsToFloats(obj) {
 }
 
 // Database functions
-async function getAllTables(client) {
-  if (!client) throw new Error('No database connection');
+async function getAllTables(pool) {
+  if (!pool) throw new Error('No database connection');
   try {
-    const result = await client.query(`
+    const result = await pool.query(`
       SELECT table_name 
       FROM information_schema.tables 
       WHERE table_schema = 'public' 
@@ -134,10 +167,10 @@ async function getAllTables(client) {
   }
 }
 
-async function getTableColumns(tableName, client) {
-  if (!client) throw new Error('No database connection');
+async function getTableColumns(tableName, pool) {
+  if (!pool) throw new Error('No database connection');
   try {
-    const result = await client.query(`
+    const result = await pool.query(`
       SELECT column_name, data_type, is_nullable
       FROM information_schema.columns 
       WHERE table_schema = 'public' 
@@ -155,11 +188,11 @@ async function getTableColumns(tableName, client) {
   }
 }
 
-async function executeSQLQuery(sqlQuery, client) {
-  if (!client) throw new Error('No database connection');
+async function executeSQLQuery(sqlQuery, pool) {
+  if (!pool) throw new Error('No database connection');
   try {
     const sqlStatements = sqlQuery.split(';').map(s => s.trim()).filter(Boolean);
-    const result = await client.query(sqlStatements[0]);
+    const result = await pool.query(sqlStatements[0]);
     // Convert results to plain objects and handle special types
     const rows = result.rows.map(row => {
       const plainRow = {};
@@ -442,7 +475,9 @@ async function saveChatSession(sessionData) {
       }
     };
     
-    await chatSessionsCollection.insertOne(session);
+    const mongo = await getMongoClient();
+    const db = mongo.db(MONGODB_DB_NAME);
+    await db.collection('chat_sessions').insertOne(session);
     return true;
   } catch (error) {
     console.error('Error saving chat session:', error);
@@ -452,7 +487,9 @@ async function saveChatSession(sessionData) {
 
 async function getChatSession(sessionId) {
   try {
-    const session = await chatSessionsCollection.findOne({ session_id: sessionId });
+    const mongo = await getMongoClient();
+    const db = mongo.db(MONGODB_DB_NAME);
+    const session = await db.collection('chat_sessions').findOne({ session_id: sessionId });
     return session;
   } catch (error) {
     console.error('Error getting chat session:', error);
@@ -462,7 +499,9 @@ async function getChatSession(sessionId) {
 
 async function updateChatSession(sessionId, updateData) {
   try {
-    const result = await chatSessionsCollection.updateOne(
+    const mongo = await getMongoClient();
+    const db = mongo.db(MONGODB_DB_NAME);
+    const result = await db.collection('chat_sessions').updateOne(
       { session_id: sessionId },
       { 
         $set: { 
@@ -806,130 +845,26 @@ app.get('/test', (req, res) => {
   });
 });
 
-// Database connection route
+// Refactor /connect-db to always use getSqlPool (default pool)
 app.post('/connect-db', async (req, res) => {
   try {
-    const { host, port, database, username, password } = req.body;
-    logDbConnectionAttempt({ host, port, database, user: username });
-    
-    const client = new Client({
-      host,
-      port,
-      database,
-      user: username,
-      password,
-      // Add connection timeout and retry options
-      connectionTimeoutMillis: 10000,
-      query_timeout: 10000,
-      statement_timeout: 10000,
-      // Add keepAlive to maintain connection
-      keepAlive: true,
-      keepAliveInitialDelayMillis: 10000
-    });
-    
-    try {
-      console.log('[DB] About to connect...');
-      await client.connect();
-      console.log('[DB] Connected!');
-    } catch (err) {
-      console.error('[DB CONNECT ERROR]', err);
-      return res.status(500).json({
-        error: 'Database connection error',
-        message: err.message,
-        details: err.stack,
-      });
-    }
-    // Test the connection
-    let versionResult;
-    try {
-      console.log('[DB] About to query version...');
-      versionResult = await client.query('SELECT version();');
-      console.log('[DB] Version query successful!');
-    } catch (err) {
-      await client.end();
-      console.error('[DB QUERY ERROR] version', err);
-      return res.status(500).json({
-        error: 'Failed to query database',
-        message: err.message,
-        details: err.stack,
-      });
-    }
-    try {
-      console.log('[DB] About to end connection...');
-      await client.end();
-      console.log('[DB] Connection ended!');
-    } catch (err) {
-      console.error('[DB END ERROR]', err);
-    }
-    res.json({
-      status: 'success',
-      message: 'Database connected successfully',
-      version: versionResult.rows[0].version,
-    });
+    const sql = getSqlPool();
+    await sql.query('SELECT 1');
+    res.json({ status: 'success', message: 'Database connected successfully' });
   } catch (error) {
-    console.error('Database connection error:', error);
-    res.status(500).json({
-      error: 'Database connection error',
-      message: error.message,
-      details: error.stack,
-    });
+    console.error('[Connect-DB] Error:', error);
+    res.status(500).json({ error: error.message, details: error.stack });
   }
 });
 
-// Chat routes
+// Refactor /ask to always use getSqlPool (default pool)
 app.post('/ask', async (req, res) => {
-  let client;
   try {
-    const { question, session_id, db } = req.body;
-
+    const { question, session_id } = req.body;
     if (!question) {
-      return res.status(400).json({
-        error: 'Missing question',
-        message: 'Question is required'
-      });
+      return res.status(400).json({ error: 'Missing question', message: 'Question is required' });
     }
-
-    if (!db || !db.host || !db.port || !db.database || !db.username || !db.password) {
-      return res.status(400).json({
-        error: 'Missing database credentials',
-        message: 'Database credentials are required'
-      });
-    }
-
-    logDbConnectionAttempt({
-      host: db.host,
-      port: db.port,
-      database: db.database,
-      user: db.username,
-    });
-
-    client = new Client({
-      host: db.host,
-      port: db.port,
-      database: db.database,
-      user: db.username,
-      password: db.password,
-    });
-
-    try {
-      console.log('[DB] About to connect...');
-      await client.connect();
-      console.log('[DB] Connected!');
-    } catch (err) {
-      console.error('[DB CONNECT ERROR]', err);
-      return res.status(500).json({
-        error: 'Database connection error',
-        message: err.message,
-        details: err.stack,
-      });
-    }
-
-    if (!client) {
-      return res.status(400).json({
-        error: 'No database connection',
-        message: 'Please connect to a database first'
-      });
-    }
+    const sql = getSqlPool();
 
     console.log(`🔍 Processing question: ${question}`);
 
@@ -943,7 +878,7 @@ app.post('/ask', async (req, res) => {
     // Step 2: Get all tables
     let allTables;
     try {
-      allTables = await getAllTables(client);
+      allTables = await getAllTables(sql);
     } catch (err) {
       console.error('[DB QUERY ERROR] getAllTables', err);
       return res.status(500).json({
@@ -979,7 +914,7 @@ app.post('/ask', async (req, res) => {
     const relevantTables = [];
     for (const tableName of relevantTableNames) {
       try {
-        const columns = await getTableColumns(tableName, client);
+        const columns = await getTableColumns(tableName, sql);
         relevantTables.push({
           name: tableName,
           columns: columns
@@ -1013,7 +948,7 @@ app.post('/ask', async (req, res) => {
     let results;
     const startTime = Date.now();
     try {
-      results = await executeSQLQuery(sqlQuery, client);
+      results = await executeSQLQuery(sqlQuery, sql);
       console.log(`🔍 Query executed successfully, got ${results.length} results`);
     } catch (err) {
       console.error('[DB QUERY ERROR] executeSQLQuery', err);
@@ -1111,21 +1046,10 @@ app.post('/ask', async (req, res) => {
     res.json(response);
 
   } catch (error) {
-    console.error('Error processing question:', error);
-    res.status(500).json({
-      error: 'Internal server error',
-      message: error.message,
-      details: error.stack
-    });
+    console.error('[Ask] Error:', error);
+    res.status(500).json({ error: error.message, details: error.stack });
   } finally {
-    if (client) {
-      try {
-        await client.end();
-        console.log('[DB] Client connection ended in finally block');
-      } catch (err) {
-        console.error('[DB END ERROR] in finally block', err);
-      }
-    }
+    // No need to close sql here, getSqlPool manages its own pool
   }
 });
 
@@ -1144,7 +1068,9 @@ app.delete('/chat-history', (req, res) => {
 // Reports routes
 app.get('/reports', async (req, res) => {
   try {
-    const reports = await reportsCollection.find({}).sort({ created_at: -1 }).toArray();
+    const mongo = await getMongoClient();
+    const db = mongo.db(MONGODB_DB_NAME);
+    const reports = await db.collection('reports').find({}).sort({ created_at: -1 }).toArray();
     const formattedReports = reports.map(report => ({
       ...report,
       _id: report._id.toString(),
@@ -1167,7 +1093,9 @@ app.post('/reports', async (req, res) => {
     report.created_at = new Date();
     report.updated_at = new Date();
     
-    const result = await reportsCollection.insertOne(report);
+    const mongo = await getMongoClient();
+    const db = mongo.db(MONGODB_DB_NAME);
+    const result = await db.collection('reports').insertOne(report);
     report._id = result.insertedId.toString();
     report.created_at = report.created_at.toISOString();
     report.updated_at = report.updated_at.toISOString();
@@ -1185,7 +1113,9 @@ app.post('/reports', async (req, res) => {
 app.get('/reports/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const report = await reportsCollection.findOne({ id });
+    const mongo = await getMongoClient();
+    const db = mongo.db(MONGODB_DB_NAME);
+    const report = await db.collection('reports').findOne({ id });
     
     if (!report) {
       return res.status(404).json({
@@ -1214,7 +1144,9 @@ app.put('/reports/:id', async (req, res) => {
     const updateData = req.body;
     updateData.updated_at = new Date();
     
-    const result = await reportsCollection.updateOne(
+    const mongo = await getMongoClient();
+    const db = mongo.db(MONGODB_DB_NAME);
+    const result = await db.collection('reports').updateOne(
       { id },
       { $set: updateData }
     );
@@ -1239,7 +1171,9 @@ app.put('/reports/:id', async (req, res) => {
 app.delete('/reports/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const result = await reportsCollection.deleteOne({ id });
+    const mongo = await getMongoClient();
+    const db = mongo.db(MONGODB_DB_NAME);
+    const result = await db.collection('reports').deleteOne({ id });
     
     if (result.deletedCount === 0) {
       return res.status(404).json({
@@ -1263,7 +1197,9 @@ app.get('/sessions', async (req, res) => {
   try {
     const limit = parseInt(req.query.limit) || 50;
     
-    const sessions = await chatSessionsCollection
+    const mongo = await getMongoClient();
+    const db = mongo.db(MONGODB_DB_NAME);
+    const sessions = await db.collection('chat_sessions')
       .find({})
       .sort({ last_activity: -1 })
       .limit(limit)
@@ -1317,7 +1253,9 @@ app.get('/sessions/:session_id', async (req, res) => {
   try {
     const { session_id } = req.params;
     
-    const session = await chatSessionsCollection.findOne({ session_id });
+    const mongo = await getMongoClient();
+    const db = mongo.db(MONGODB_DB_NAME);
+    const session = await db.collection('chat_sessions').findOne({ session_id });
     
     if (!session) {
       return res.status(404).json({
@@ -1355,7 +1293,9 @@ app.delete('/sessions/:session_id', async (req, res) => {
   try {
     const { session_id } = req.params;
     
-    const result = await chatSessionsCollection.deleteOne({ session_id });
+    const mongo = await getMongoClient();
+    const db = mongo.db(MONGODB_DB_NAME);
+    const result = await db.collection('chat_sessions').deleteOne({ session_id });
 
     if (result.deletedCount === 0) {
       return res.status(404).json({
@@ -1381,7 +1321,9 @@ app.post('/sessions/:session_id/restore', async (req, res) => {
   try {
     const { session_id } = req.params;
     
-    const session = await chatSessionsCollection.findOne({ session_id });
+    const mongo = await getMongoClient();
+    const db = mongo.db(MONGODB_DB_NAME);
+    const session = await db.collection('chat_sessions').findOne({ session_id });
     
     if (!session) {
       return res.status(404).json({
@@ -1414,7 +1356,7 @@ app.post('/sessions/:session_id/restore', async (req, res) => {
     }
 
     // Update last activity
-    await chatSessionsCollection.updateOne(
+    await db.collection('chat_sessions').updateOne(
       { session_id },
       { 
         $set: { 
@@ -1457,6 +1399,8 @@ app.post('/sessions/:session_id/restore', async (req, res) => {
 // Test MongoDB connection endpoint
 app.get('/test-mongo', async (req, res) => {
   try {
+    const mongo = await getMongoClient();
+    const db = mongo.db(MONGODB_DB_NAME);
     await db.command({ ping: 1 });
     res.json({ 
       message: 'MongoDB connection successful!',
@@ -1464,7 +1408,29 @@ app.get('/test-mongo', async (req, res) => {
       collections: await db.listCollections().toArray()
     });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error('MongoDB test error:', error);
+    res.status(500).json({ error: error.message, stack: error.stack });
+  }
+});
+
+// Test PostgreSQL connection endpoint
+app.get('/test-postgres', async (req, res) => {
+  try {
+    const sql = getSqlPool();
+    const result = await sql.query('SELECT version();');
+    res.json({ 
+      message: 'PostgreSQL connection successful!',
+      version: result.rows[0].version,
+      connection: {
+        host: POSTGRES_HOST,
+        port: POSTGRES_PORT,
+        database: POSTGRES_DATABASE,
+        user: POSTGRES_USER
+      }
+    });
+  } catch (error) {
+    console.error('PostgreSQL test error:', error);
+    res.status(500).json({ error: error.message, stack: error.stack });
   }
 });
 
@@ -1487,47 +1453,31 @@ app.use('*', (req, res) => {
   });
 });
 
-async function initServer() {
-  // 1. Initialize MongoDB
-  const mongoConnected = await initMongoDB();
-  if (!mongoConnected) {
-    console.error('Failed to connect to MongoDB');
-    if (process.env.AWS_LAMBDA_FUNCTION_NAME) {
-      // In Lambda, don't exit process, just log error
-      console.error('MongoDB connection failed in Lambda environment');
-    } else {
+// Lambda handler export using aws-serverless-express
+const server = awsServerlessExpress.createServer(app);
+export const handler = (event, context) => awsServerlessExpress.proxy(server, event, context);
+export { app };
+
+// Only start the server locally if not running in Lambda
+if (!process.env.AWS_LAMBDA_FUNCTION_NAME) {
+  (async () => {
+    // 1. Initialize MongoDB
+    const mongoConnected = await getMongoClient();
+    if (!mongoConnected) {
+      console.error('Failed to connect to MongoDB');
       process.exit(1);
     }
-  }
-
-  console.log('✅ MongoDB initialized');
-
-  // 4. Start server only if not in Lambda
-  const PORT = process.env.PORT || 8000;
-  app.listen(PORT, () => {
-    console.log(`🚀 Server running on port ${PORT}`);
-  });
-}
-
-// Start the server
-initServer().catch(console.error);
-
-// Graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('SIGTERM received, shutting down gracefully');
-  if (pgClient) {
-    pgClient.end();
-  }
-  process.exit(0);
-});
-
-process.on('SIGINT', () => {
-  console.log('SIGINT received, shutting down gracefully');
-  if (pgClient) {
-    pgClient.end();
-  }
-  process.exit(0);
-});
-
-// Export for testing
-export { app, db, mongoClient, pgClient }; 
+    // 2. Initialize PostgreSQL
+    const postgresConnected = await getSqlPool();
+    if (!postgresConnected) {
+      console.log('⚠️  PostgreSQL not connected - will use dynamic connections');
+    } else {
+      console.log('✅ PostgreSQL initialized');
+    }
+    // 3. Start server
+    const PORT = process.env.PORT || 8000;
+    app.listen(PORT, () => {
+      console.log(`🚀 Server running on port ${PORT}`);
+    });
+  })();
+} 
