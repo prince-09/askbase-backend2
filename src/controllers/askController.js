@@ -1,6 +1,6 @@
 import { generateSessionId, validateSQL } from '../utils/helpers.js';
 import { getAllTables, getTableColumns, executeSQLQuery } from '../services/databaseService.js';
-import { askAIForRelevantTables, askAIForSQL, generateNaturalLanguageAnswer, generateFallbackSQL } from '../services/aiService.js';
+import { askAIForRelevantTables, askAIForSQL, generateNaturalLanguageAnswer, generateFallbackSQL, askAIForVisualizationType, generateSessionName, suggestFollowupQuestions } from '../services/aiService.js';
 import { getConversationContext, addMessageToSession, createSessionIfNotExists, resetSessionHistory } from '../services/sessionService.js';
 import { detectChartRequest, generateChartData } from '../services/chartService.js';
 
@@ -12,12 +12,22 @@ export async function handleAskRequest(req, res) {
       return res.status(400).json({ error: 'Missing question', message: 'Question is required' });
     }
 
-    // Step 1: Get or create session
+    // Step 1: Get or create session with AI-generated name
     let currentSessionId = session_id;
+    let sessionName = null;
+    
     if (!currentSessionId) {
       currentSessionId = generateSessionId();
+      // Generate session name from the first question
+      try {
+        sessionName = await generateSessionName(question);
+      } catch (error) {
+        console.error('Error generating session name:', error);
+        sessionName = 'Data Analysis Session';
+      }
     }
-    await createSessionIfNotExists(currentSessionId);
+    
+    await createSessionIfNotExists(currentSessionId, connection_id, sessionName);
 
     // Step 2: Get last few messages for context
     const chatHistory = await getConversationContext(currentSessionId, 6); // last 6 exchanges
@@ -42,6 +52,7 @@ export async function handleAskRequest(req, res) {
           port: connection.port || 5432,
           database: connection.database,
           user: connection.username,
+          pool_mode: 'transaction',
           password: connection.password,
           max: 1,
           idleTimeoutMillis: 5000,
@@ -163,11 +174,27 @@ export async function handleAskRequest(req, res) {
     }
     const executionTime = Date.now() - startTime;
 
-    // Step 8: Check for chart request and generate chart data
-    const chartRequest = detectChartRequest(question);
+    // Step 8: Use AI to detect visualization type and generate chart data
     let chartData = null;
-    if (chartRequest.requested && results.length > 0) {
-      chartData = generateChartData(results, chartRequest.type);
+    let visualizationRecommendation = null;
+    
+    try {
+      // Use AI to determine if visualization is needed and what type
+      visualizationRecommendation = await askAIForVisualizationType(question, sqlQuery, results, relevantTableNames);
+      
+      if (visualizationRecommendation.requested && results.length > 0) {
+        chartData = generateChartData(results, visualizationRecommendation.type, visualizationRecommendation);
+        console.log(`🔍 Generated visualization: ${visualizationRecommendation.type} with confidence: ${visualizationRecommendation.confidence}`);
+      } else if (visualizationRecommendation.reasoning) {
+        console.log(`🔍 AI reasoning for no visualization: ${visualizationRecommendation.reasoning}`);
+      }
+    } catch (error) {
+      console.error('Error in AI visualization detection:', error);
+      // Fallback to existing chart detection
+      const chartRequest = detectChartRequest(question);
+      if (chartRequest.requested && results.length > 0) {
+        chartData = generateChartData(results, chartRequest.type);
+      }
     }
 
     // Step 9: Generate natural language answer
@@ -176,6 +203,22 @@ export async function handleAskRequest(req, res) {
       naturalAnswer = await generateNaturalLanguageAnswer(question, sqlQuery, results, relevantTableNames, chatHistory);
     } catch (err) {
       return res.status(500).json({ error: 'Failed to generate natural language answer', message: err.message });
+    }
+
+    // Step 9.5: Suggest follow-up questions using AI
+    let followupQuestions = [];
+    try {
+      followupQuestions = await suggestFollowupQuestions(
+        question,
+        naturalAnswer,
+        sqlQuery,
+        results,
+        relevantTableNames,
+        chatHistory
+      );
+    } catch (err) {
+      console.error('Error suggesting follow-up questions:', err);
+      followupQuestions = [];
     }
 
     // Step 10: Save single question-answer message to session (matching Python backend)
@@ -191,7 +234,14 @@ export async function handleAskRequest(req, res) {
       natural_answer: naturalAnswer,
       execution_time_ms: executionTime,
       is_followup_question: chatHistory.length > 0,
-      chart_data: chartData
+      chart_data: chartData,
+      visualization_recommendation: visualizationRecommendation ? {
+        type: visualizationRecommendation.type,
+        confidence: visualizationRecommendation.confidence,
+        reasoning: visualizationRecommendation.reasoning,
+        data_suitable: visualizationRecommendation.data_suitable
+      } : null,
+      followup_questions: followupQuestions
     };
     
     console.log(`🔍 Saving single message to session: ${currentSessionId}`);
@@ -201,15 +251,23 @@ export async function handleAskRequest(req, res) {
     
     console.log(`🔍 Message saved: ${messageSaved}`);
 
-    // Step 11: Prepare response
+    // Step 11: Prepare response with enhanced visualization data
     const response = {
       answer: naturalAnswer,
       sql: sqlQuery,
       results: results.slice(0, 5),
       tables_used: relevantTableNames,
       session_id: currentSessionId,
+      session_name: sessionName,
       execution_time_ms: executionTime,
-      chart_data: chartData
+      chart_data: chartData,
+      visualization_recommendation: visualizationRecommendation ? {
+        type: visualizationRecommendation.type,
+        confidence: visualizationRecommendation.confidence,
+        reasoning: visualizationRecommendation.reasoning,
+        data_suitable: visualizationRecommendation.data_suitable
+      } : null,
+      followup_questions: followupQuestions
     };
     res.json(response);
   } catch (error) {

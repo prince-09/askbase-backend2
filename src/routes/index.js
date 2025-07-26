@@ -65,6 +65,7 @@ router.delete('/api/users/:clerk_id', usersController.deleteUser);
 
 // Database Connections routes
 router.post('/api/database-connections', databaseConnectionsController.saveDatabaseConnection);
+router.get('/api/database-connections/connection/:connection_id', databaseConnectionsController.getDatabaseConnectionById);
 router.get('/api/database-connections/:clerk_id', databaseConnectionsController.getUserDatabaseConnections);
 router.get('/api/database-connections/:connection_id/password', databaseConnectionsController.getDatabasePassword);
 router.post('/api/database-connections/test', databaseConnectionsController.testDatabaseConnection);
@@ -79,12 +80,58 @@ router.post('/api/sample-data/check', sampleDataController.checkSampleData);
 router.post('/api/webhook/clerk', clerkWebhookController.handleClerkWebhook);
 
 // Embed routes
-router.post('/embed/validate', embedController.validateEmbedKey);
-router.post('/embed/ask', embedController.handleEmbedAskRequest);
-router.get('/embed/schema', embedController.getEmbedSchema);
-router.post('/api/embed-keys', embedController.generateEmbedKey);
-router.get('/api/embed-keys/:clerk_id', embedController.getUserEmbedKeys);
-router.delete('/api/embed-keys/:embed_id', embedController.deleteEmbedKey);
+router.options('/embed/validate', (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+  res.status(200).end();
+});
+router.post('/embed/validate', (req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+  next();
+}, embedController.validateEmbedKey);
+
+// Embed Keys API routes
+router.options('/api/embed-keys', (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+  res.status(200).end();
+});
+router.post('/api/embed-keys', (req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+  next();
+}, embedController.generateEmbedKey);
+
+router.options('/api/embed-keys/:clerk_id', (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+  res.status(200).end();
+});
+router.get('/api/embed-keys/:clerk_id', (req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+  next();
+}, embedController.getUserEmbedKeys);
+
+router.options('/api/embed-keys/:embed_id', (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+  res.status(200).end();
+});
+router.delete('/api/embed-keys/:embed_id', (req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+  next();
+}, embedController.deleteEmbedKey);
 
 // Serve embed script with proper CORS headers
 router.get('/embed.js', (req, res) => {
@@ -98,6 +145,56 @@ router.get('/embed.js', (req, res) => {
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
   res.sendFile('public/embed.js', { root: process.cwd() });
+});
+
+// Serve embed widget HTML
+router.get('/embed-widget', (req, res) => {
+  const embedKey = req.query.key;
+  if (!embedKey) {
+    return res.status(400).send('Missing embed key');
+  }
+  
+  const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3001';
+  const embedUrl = `${frontendUrl}/embed?key=${encodeURIComponent(embedKey)}`;
+  
+  const html = `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Askbase Chat</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        }
+        #__next {
+            height: 100vh;
+            width: 100vw;
+        }
+        iframe {
+            width: 100%;
+            height: 100%;
+            border: none;
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <iframe src="${embedUrl}" title="Askbase Chat" allow="microphone"></iframe>
+</body>
+</html>`;
+  
+  res.setHeader('Content-Type', 'text/html');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+  res.setHeader('Cross-Origin-Embedder-Policy', 'unsafe-none');
+  res.setHeader('Cross-Origin-Opener-Policy', 'unsafe-none');
+  res.send(html);
 });
 
 export default router; 

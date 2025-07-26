@@ -62,8 +62,8 @@ export function detectChartRequest(question) {
   };
 }
 
-// Generate chart data from SQL results
-export function generateChartData(results, chartType) {
+// Generate chart data from SQL results with enhanced visualization support
+export function generateChartData(results, chartType, aiRecommendation = null) {
   if (!results || results.length === 0) {
     return null;
   }
@@ -76,8 +76,19 @@ export function generateChartData(results, chartType) {
       return null;
     }
     
+    // Enhanced chart type detection with AI recommendations
+    let finalChartType = chartType;
+    let confidence = 'medium';
+    let reasoning = '';
+    
+    if (aiRecommendation) {
+      finalChartType = aiRecommendation.type || chartType;
+      confidence = aiRecommendation.confidence || 'medium';
+      reasoning = aiRecommendation.reasoning || '';
+    }
+    
     // For bar, line, and pie charts, we need at least 2 columns
-    if (['bar', 'line', 'pie'].includes(chartType)) {
+    if (['bar', 'line', 'pie'].includes(finalChartType)) {
       if (columns.length < 2) {
         return null;
       }
@@ -106,7 +117,7 @@ export function generateChartData(results, chartType) {
         return null;
       }
       
-      if (chartType === 'bar') {
+      if (finalChartType === 'bar') {
         return {
           type: 'bar',
           data: {
@@ -127,11 +138,17 @@ export function generateChartData(results, chartType) {
                 text: `${valueCol} by ${labelCol}`
               }
             }
+          },
+          metadata: {
+            confidence: confidence,
+            reasoning: reasoning,
+            data_points: numericValues.length,
+            columns_used: [labelCol, valueCol]
           }
         };
       }
       
-      else if (chartType === 'line') {
+      else if (finalChartType === 'line') {
         return {
           type: 'line',
           data: {
@@ -152,11 +169,17 @@ export function generateChartData(results, chartType) {
                 text: `${valueCol} over ${labelCol}`
               }
             }
+          },
+          metadata: {
+            confidence: confidence,
+            reasoning: reasoning,
+            data_points: numericValues.length,
+            columns_used: [labelCol, valueCol]
           }
         };
       }
       
-      else if (chartType === 'pie') {
+      else if (finalChartType === 'pie') {
         return {
           type: 'pie',
           data: {
@@ -180,12 +203,18 @@ export function generateChartData(results, chartType) {
                 text: `Distribution of ${valueCol}`
               }
             }
+          },
+          metadata: {
+            confidence: confidence,
+            reasoning: reasoning,
+            data_points: numericValues.length,
+            columns_used: [labelCol, valueCol]
           }
         };
       }
     }
     
-    else if (chartType === 'scatter') {
+    else if (finalChartType === 'scatter') {
       if (columns.length < 3) {
         return null;
       }
@@ -249,6 +278,38 @@ export function generateChartData(results, chartType) {
               }
             }
           }
+        },
+        metadata: {
+          confidence: confidence,
+          reasoning: reasoning,
+          data_points: points.length,
+          columns_used: [xCol, yCol, labelCol].filter(Boolean)
+        }
+      };
+    }
+    
+    // Handle table visualization for non-chart data
+    else if (finalChartType === 'table') {
+      return {
+        type: 'table',
+        data: {
+          columns: columns,
+          rows: results.slice(0, 100) // Limit to 100 rows for performance
+        },
+        options: {
+          responsive: true,
+          plugins: {
+            title: {
+              display: true,
+              text: `Data Table (${results.length} rows)`
+            }
+          }
+        },
+        metadata: {
+          confidence: confidence,
+          reasoning: reasoning,
+          data_points: results.length,
+          columns_used: columns
         }
       };
     }

@@ -35,6 +35,7 @@ export async function saveDatabaseConnection(req, res) {
         database: testConnection.database,
         user: testConnection.user,
         password: testConnection.password,
+      
         max: 1,
         idleTimeoutMillis: 5000,
         connectionTimeoutMillis: 5000,
@@ -87,6 +88,60 @@ export async function saveDatabaseConnection(req, res) {
   }
 }
 
+// Get a single database connection by ID
+export async function getDatabaseConnectionById(req, res) {
+  try {
+    const { connection_id } = req.params;
+    
+    if (!connection_id) {
+      return res.status(400).json({ 
+        error: 'Missing connection_id', 
+        message: 'connection_id is required' 
+      });
+    }
+
+    const mongoClient = await getMongoClient();
+    const db = mongoClient.db(MONGODB_DB_NAME);
+    const connectionsCollection = db.collection('database_connections');
+
+    const connection = await connectionsCollection.findOne({ 
+      _id: new (await import('mongodb')).ObjectId(connection_id) 
+    });
+
+    if (!connection) {
+      return res.status(404).json({ 
+        error: 'Connection not found', 
+        message: `Database connection with id ${connection_id} not found` 
+      });
+    }
+
+    // Don't return the password for security
+    const { password, ...connectionWithoutPassword } = connection;
+    
+    res.json({ 
+      success: true, 
+      connection: {
+        id: connection._id.toString(),
+        connection_name: connection.connection_name,
+        host: connection.host,
+        port: connection.port,
+        database: connection.database,
+        username: connection.username,
+        database_type: connection.database_type,
+        created_at: connection.created_at,
+        last_used: connection.last_used,
+        is_active: connection.is_active
+      }
+    });
+  } catch (error) {
+    console.error('[Database-Connections-Controller] Error:', error);
+    res.status(500).json({ 
+      error: 'Failed to get database connection', 
+      message: error.message 
+    });
+  }
+}
+
 // Get all database connections for a user
 export async function getUserDatabaseConnections(req, res) {
   try {
@@ -113,7 +168,7 @@ export async function getUserDatabaseConnections(req, res) {
     res.json({ 
       success: true, 
       connections: connections.map(conn => ({
-        id: conn._id,
+        id: conn._id.toString(),
         connection_name: conn.connection_name,
         host: conn.host,
         port: conn.port,

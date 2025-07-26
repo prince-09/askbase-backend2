@@ -1,6 +1,9 @@
 import axios from 'axios';
 import { AI_API_URL, AI_API_KEY, MISTRAL_MODEL } from '../config/database.js';
 import { cleanSQLResponse } from '../utils/helpers.js';
+import { detectChartRequest, generateChartData } from './chartService.js';
+import { getAllTables, getTableColumns, executeSQLQuery } from './databaseService.js';
+import { Pool } from 'pg';
 
 // Ask AI to find relevant tables for a question
 export async function askAIForRelevantTables(question, allTables, chatHistory = []) {
@@ -223,11 +226,6 @@ export function generateFallbackSQL(relevantTables, question) {
 // Main function to generate a complete response for embed requests
 export async function generateResponse(question, connection) {
   try {
-    // Import required services
-    const { getAllTables, getTableColumns, executeSQLQuery } = await import('./databaseService.js');
-    const { detectChartRequest, generateChartData } = await import('./chartService.js');
-    const { Pool } = await import('pg');
-
     // Step 1: Create database connection
     const dbPool = new Pool({
       host: connection.host,
@@ -471,5 +469,266 @@ Return only the natural language answer based on the real data provided.
   } catch (error) {
     console.error('Error generating natural language answer:', error);
     return `Found ${results.length} results from the query.`;
+  }
+} 
+
+// Ask AI to detect visualization type and provide recommendations
+export async function askAIForVisualizationType(question, sqlQuery, results, tablesUsed) {
+  if (!AI_API_KEY) {
+    // Fallback to existing chart detection
+    return detectChartRequest(question);
+  }
+
+  try {
+    // Prepare sample data for context
+    let sampleData = '';
+    if (results && results.length > 0) {
+      const firstRow = results[0];
+      sampleData = `Sample data: ${Object.entries(firstRow).map(([k, v]) => `${k}=${v}`).join(', ')}`;
+    }
+
+    const prompt = `
+Given this question: "${question}"
+SQL Query: ${sqlQuery}
+Tables used: ${tablesUsed.join(', ')}
+${sampleData}
+
+Analyze this request and determine:
+1. Is a visualization requested or would it be helpful?
+2. What type of chart would be most appropriate?
+3. What is the confidence level of this recommendation?
+
+Consider:
+- Data types (categorical, numerical, temporal)
+- Number of data points
+- Relationships being analyzed
+- User intent (comparison, trend, distribution, correlation)
+
+Return a JSON object with:
+{
+  "visualization_requested": boolean,
+  "recommended_chart_type": "bar|line|pie|scatter|table|none",
+  "confidence": "high|medium|low",
+  "reasoning": "brief explanation",
+  "data_suitable": boolean
+}
+    `;
+
+    const response = await axios.post(AI_API_URL, {
+      model: MISTRAL_MODEL,
+      messages: [
+        { role: 'system', content: 'You are a data visualization expert. Return only valid JSON.' },
+        { role: 'user', content: prompt }
+      ],
+      max_tokens: 300,
+      temperature: 0.1
+    }, {
+      headers: {
+        'Authorization': `Bearer ${AI_API_KEY}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': 'https://askbase.local',
+        'X-Title': 'AskBase'
+      }
+    });
+
+    const aiResponse = response.data.choices[0].message.content.trim();
+    
+    try {
+      const visualizationData = JSON.parse(aiResponse);
+      console.log(`🔍 AI visualization recommendation:`, visualizationData);
+      
+      return {
+        type: visualizationData.recommended_chart_type,
+        requested: visualizationData.visualization_requested,
+        confidence: visualizationData.confidence,
+        reasoning: visualizationData.reasoning,
+        data_suitable: visualizationData.data_suitable
+      };
+    } catch (parseError) {
+      console.error('Error parsing AI visualization response:', parseError);
+      // Fallback to existing detection
+      return detectChartRequest(question);
+    }
+  } catch (error) {
+    console.error('Error asking AI for visualization type:', error);
+    // Fallback to existing detection
+    return detectChartRequest(question);
+  }
+}
+
+// Ask AI to generate a meaningful session name from the first question
+export async function generateSessionName(question, tablesUsed = []) {
+  if (!AI_API_KEY) {
+    // Fallback: use first few words of the question
+    const words = question.split(' ').slice(0, 3).join(' ');
+    return words.length > 0 ? words : 'New Session';
+  }
+
+  try {
+    const prompt = `
+Given this question: "${question}"
+Tables involved: ${tablesUsed.join(', ')}
+
+Generate a short, descriptive session name (max 50 characters) that captures the main topic or intent of this conversation. 
+The name should be:
+- Clear and descriptive
+- Professional
+- Related to the data being analyzed
+- Suitable for a business context
+
+Return only the session name, no quotes or additional text.
+    `;
+
+    const response = await axios.post(AI_API_URL, {
+      model: MISTRAL_MODEL,
+      messages: [
+        { role: 'system', content: 'You are a business analyst. Return only a short, descriptive session name.' },
+        { role: 'user', content: prompt }
+      ],
+      max_tokens: 100,
+      temperature: 0.3
+    }, {
+      headers: {
+        'Authorization': `Bearer ${AI_API_KEY}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': 'https://askbase.local',
+        'X-Title': 'AskBase'
+      }
+    });
+
+    const sessionName = response.data.choices[0].message.content.trim();
+    
+    // Clean up the response and ensure it's not too long
+    const cleanName = sessionName.replace(/["']/g, '').substring(0, 50);
+    
+    console.log(`🔍 AI generated session name: "${cleanName}"`);
+    return cleanName || 'Data Analysis Session';
+  } catch (error) {
+    console.error('Error generating session name:', error);
+    // Fallback: use first few words of the question
+    const words = question.split(' ').slice(0, 3).join(' ');
+    return words.length > 0 ? words : 'New Session';
+  }
+} 
+
+// Ask AI to suggest follow-up questions based on the current question, answer, and results
+export async function suggestFollowupQuestions(question, answer, sqlQuery, results, tablesUsed, chatHistory = []) {
+  if (!AI_API_KEY) {
+    // Fallback: simple generic suggestions
+    return [
+      'Show me a trend over time',
+      'Break down by category',
+      'Show top 5 results',
+      'Compare with previous period'
+    ];
+  }
+
+  try {
+    // Build context from recent chat history
+    let context = '';
+    if (chatHistory.length > 0) {
+      const recentHistory = chatHistory.slice(-2);
+      context = '\n\nRecent conversation context:\n';
+      for (let i = 0; i < recentHistory.length; i++) {
+        const entry = recentHistory[i];
+        context += `Previous question ${i + 1}: ${entry.question}\n`;
+        context += `Previous answer: ${entry.answer}\n`;
+      }
+    }
+
+    // Format the SQL results data for the AI
+    let resultsData = '';
+    if (results && results.length > 0) {
+      resultsData = '\n\nSQL Results Data:\n';
+      const resultsToShow = results.slice(0, 5);
+      resultsData += JSON.stringify(resultsToShow, null, 2);
+    } else {
+      resultsData = '\n\nSQL Results Data: No data found';
+    }
+
+    const prompt = `
+Given the following:
+- User question: "${question}"
+- SQL query: ${sqlQuery}
+- Tables used: ${tablesUsed.join(', ')}
+- Natural language answer: ${answer}
+- Number of results: ${results.length}
+${resultsData}
+${context}
+
+Suggest 3-5 highly relevant follow-up questions the user might want to ask next. These should help the user explore the data further, clarify results, or perform deeper analysis. Make them specific to the context and data.
+
+IMPORTANT: Return ONLY a valid JSON array of strings. Example format:
+["Question 1", "Question 2", "Question 3"]
+
+Do not include any explanations, just the JSON array.
+    `;
+
+    const response = await axios.post(AI_API_URL, {
+      model: MISTRAL_MODEL,
+      messages: [
+        { role: 'system', content: 'You are a helpful data assistant. Return only a valid JSON array of follow-up questions as strings.' },
+        { role: 'user', content: prompt }
+      ],
+      max_tokens: 300,
+      temperature: 0.3
+    }, {
+      headers: {
+        'Authorization': `Bearer ${AI_API_KEY}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': 'https://askbase.local',
+        'X-Title': 'AskBase'
+      }
+    });
+
+    const aiResponse = response.data.choices[0].message.content.trim();
+    console.log(`🔍 AI follow-up response: ${aiResponse}`);
+    
+    try {
+      // Try to parse as JSON first
+      const followups = JSON.parse(aiResponse);
+      if (Array.isArray(followups)) {
+        // Ensure all items are strings
+        const cleanFollowups = followups
+          .map(q => typeof q === 'string' ? q.trim() : String(q).trim())
+          .filter(q => q.length > 0)
+          .slice(0, 5);
+        console.log(`🔍 Parsed follow-ups: ${JSON.stringify(cleanFollowups)}`);
+        return cleanFollowups;
+      }
+    } catch (jsonErr) {
+      console.log(`🔍 JSON parsing failed, trying to extract questions: ${jsonErr.message}`);
+    }
+    
+    // Fallback: try to extract questions from the response
+    const lines = aiResponse.split('\n').map(line => line.trim()).filter(Boolean);
+    const questions = [];
+    
+    for (const line of lines) {
+      // Remove common prefixes and quotes
+      let cleanLine = line
+        .replace(/^["']/, '')
+        .replace(/["']$/, '')
+        .replace(/^[-*•]\s*/, '')
+        .replace(/^\d+\.\s*/, '')
+        .trim();
+      
+      if (cleanLine.length > 10 && cleanLine.length < 200) {
+        questions.push(cleanLine);
+      }
+    }
+    
+    const finalQuestions = questions.slice(0, 5);
+    console.log(`🔍 Extracted follow-ups: ${JSON.stringify(finalQuestions)}`);
+    return finalQuestions;
+    
+  } catch (error) {
+    console.error('Error suggesting follow-up questions:', error);
+    // Return simple fallback questions
+    return [
+      'Show me more details about this data',
+      'Can you break this down by category?',
+      'What are the trends over time?'
+    ];
   }
 } 

@@ -78,7 +78,9 @@ export async function addMessageToSession(sessionId, messageData) {
       natural_answer: messageData.natural_answer,
       execution_time_ms: messageData.execution_time_ms,
       is_followup_question: messageData.is_followup_question,
-      chart_data: messageData.chart_data
+      chart_data: messageData.chart_data,
+      visualization_recommendation: messageData.visualization_recommendation,
+      followup_questions: messageData.followup_questions
     };
     
     console.log(`🔍 Prepared message:`, message);
@@ -105,7 +107,7 @@ export async function addMessageToSession(sessionId, messageData) {
 }
 
 // Create new session if it doesn't exist
-export async function createSessionIfNotExists(sessionId, databaseConnection = null) {
+export async function createSessionIfNotExists(sessionId, databaseConnection = null, sessionName = null) {
   try {
     console.log(`🔍 Creating session if not exists: ${sessionId}`);
     
@@ -118,6 +120,7 @@ export async function createSessionIfNotExists(sessionId, databaseConnection = n
     if (!existingSession) {
       const newSession = {
         session_id: sessionId,
+        name: sessionName || 'Data Analysis Session',
         created_at: new Date(),
         last_activity: new Date(),
         database_connection: databaseConnection,
@@ -136,7 +139,7 @@ export async function createSessionIfNotExists(sessionId, databaseConnection = n
       
       const result = await db.collection('chat_sessions').insertOne(newSession);
       console.log(`🔍 Insert result:`, result);
-      console.log(`✅ Created new session: ${sessionId}`);
+      console.log(`✅ Created new session: ${sessionId} with name: ${newSession.name}`);
       return true;
     }
     
@@ -196,14 +199,22 @@ export async function updateChatSession(sessionId, updateData) {
 }
 
 // Get all sessions with pagination
-export async function getAllSessions(limit = 50) {
+export async function getAllSessions(limit = 50, databaseConnection = null) {
   try {
-    console.log(`🔍 Getting all sessions with limit: ${limit}`);
+    console.log(`🔍 Getting all sessions with limit: ${limit}${databaseConnection ? `, filtered by connection: ${databaseConnection}` : ''}`);
     
     const mongo = await getMongoClient();
     const db = mongo.db(MONGODB_DB_NAME);
+    
+    // Build query filter
+    const filter = {};
+    console.log(`🔍 Database connection: ${databaseConnection}`);
+    if (databaseConnection) {
+      filter.database_connection = databaseConnection;
+    }
+    
     const sessions = await db.collection('chat_sessions')
-      .find({})
+      .find(filter)
       .sort({ last_activity: -1 })
       .limit(limit)
       .toArray();
@@ -219,6 +230,7 @@ export async function getAllSessions(limit = 50) {
         created_at: safeDateToISO(session.created_at),
         last_activity: safeDateToISO(session.last_activity),
         database_connection: session.database_connection,
+        name: session.name,
         ai_model_used: session.ai_model_used,
         message_count: messageCount,
         metadata: session.metadata || {

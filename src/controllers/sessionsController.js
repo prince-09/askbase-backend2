@@ -5,7 +5,8 @@ import { safeDateToISO } from '../utils/helpers.js';
 export async function getSessions(req, res) {
   try {
     const limit = parseInt(req.query.limit) || 50;
-    const sessions = await getAllSessions(limit);
+    const databaseConnection = req.query.database_connection || null;
+    const sessions = await getAllSessions(limit, databaseConnection);
     
     res.json({
       sessions: sessions
